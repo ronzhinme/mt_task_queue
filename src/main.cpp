@@ -2,13 +2,10 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <cstdlib> // for rand
 
 using namespace std;
 using namespace std::chrono_literals;
-
-std::mutex requestMutex;
-std::mutex stopMutex;
-constexpr int NumberOfThreads = 20;
 
 class Request
 {
@@ -16,94 +13,148 @@ public:
     void doRequest()
     {
         std::cout << "Do Request at thread: " << std::this_thread::get_id() << std::endl;
-        std::this_thread::sleep_for(2s);
-        std::cout << "Done" << std:: endl;
         std::this_thread::sleep_for(1s);
+        std::cout << "Done" << std:: endl;
     }
 };
 
-std::queue<Request*> requestQueue;
-bool isStopRequested = false;
-
-auto shouldWork = []()
+class RequestController
 {
-    const std::scoped_lock lock{requestMutex, stopMutex};
-    return !isStopRequested && requestQueue.size() < 5000000;
-};
-
-// возвращает nullptr если нужно завершить процесс, либо указатель на память,
-// которую в дальнейшем требуется удалить
-Request* GetRequest() throw()
-{
-    if(!shouldWork())
+public:
+    // возвращает nullptr если нужно завершить процесс, либо указатель на память,
+    // которую в дальнейшем требуется удалить
+    Request* GetRequest() throw()
     {
-        return nullptr;
-    }
+        // Вызовы GetRequest() и ProcessRequest() могут работать долго.
+        const auto waitTime = std::chrono::milliseconds(100 + (std::rand() / 30));
+        std::this_thread::sleep_for(waitTime);
+        std::cout << "wait ms: " << waitTime.count() << std::endl;
 
-    return new Request();
-}
-
-// обрабатывает запрос, но память не удаляет
-void ProcessRequest(Request* request) throw()
-{
-    if(!request)
-    {
-        return;
-    }
-
-    const std::lock_guard<std::mutex> lock(requestMutex);
-    requestQueue.push(request);
-}
-
-void threadWorkerFunction()
-{
-    while(shouldWork())
-    {
-        if(requestQueue.empty())
+        if(!Started())
         {
-            continue;
+            return {};
         }
 
-        Request* request = nullptr;
+        try
         {
-            const std::lock_guard<std::mutex> lock(requestMutex);
-            request = requestQueue.front();
+            return new Request();
         }
+        catch(...)
+        {
+            // do smth
+            return {};
+        }
+    }
+
+    // обрабатывает запрос, но память не удаляет
+    void ProcessRequest(Request* request) throw()
+    {
+        // Вызовы GetRequest() и ProcessRequest() могут работать долго.
+        const auto waitTime = std::chrono::milliseconds(100 + (std::rand() / 30));
+        std::this_thread::sleep_for(waitTime);
+        std::cout << "wait ms: " << waitTime.count() << std::endl;
 
         if(request)
         {
-            request->doRequest();
+            try
             {
-                const std::lock_guard<std::mutex> lock(requestMutex);
-                requestQueue.pop();
-                std::cout << " size: "<< requestQueue.size() << std::endl;
+                request->doRequest();
             }
+            catch(...)
+            {
+                // do smth
+            }
+        }
+    }
+
+    void PushRequest(Request* request)
+    {
+        if(!request)
+        {
+            return;
+        }
+
+        const std::lock_guard<std::mutex> lock(requestMutex_);
+        requestQueue_.push(request);
+        std::cout << "New request count: " << requestQueue_.size() << std::endl;
+    }
+
+    bool Started()
+    {
+        const std::scoped_lock lock{requestMutex_, stopMutex_};
+        return isStarted_ && requestQueue_.size() < maxRequestInQueue_;
+    }
+
+    void ProcessStop()
+    {
+        const std::lock_guard<std::mutex> lock(stopMutex_);
+        isStarted_ = false;
+    }
+
+    Request* TakeFrontRequest()
+    {
+        const std::lock_guard<std::mutex> lock(requestMutex_);
+        if(requestQueue_.empty())
+        {
+            return {};
+        }
+
+        const auto request = requestQueue_.front();
+        requestQueue_.pop();
+        return request;
+    }
+private:
+    std::mutex requestMutex_;
+    std::mutex stopMutex_;
+    std::queue<Request*> requestQueue_;
+    bool isStarted_ = true;
+    const int maxRequestInQueue_ = 10;
+};
+
+const int NumberOfThreads = 2;
+
+void threadWorkerFunction(std::shared_ptr<RequestController> controller)
+{
+    //2)	Завершиться, как только основной поток ему это скомандует.
+    while(controller->Started())
+    {
+        if(const auto request = controller->TakeFrontRequest())
+        {
+            // 1)	Обрабатывать поступающие через очередь запросы с помощью ProcessRequest.
+            request->doRequest();
+            // ... на память, которую в дальнейшем требуется удалить
+            delete request;
         }
     }
 }
 
 int main()
 {
+    std::srand(std::time(nullptr));
+    const auto controller = std::make_shared<RequestController>();
+
+    //1)	Запустить несколько рабочих потоков (NumberOfThreads).
     std::vector<std::thread> threads(NumberOfThreads);
     for(auto &thread : threads)
     {
-        thread = std::thread(threadWorkerFunction);
+        thread = std::thread(threadWorkerFunction, controller);
     }
 
-    while(const auto& request = GetRequest())
+    //2)	Класть в одну очередь заданий задачи до тех пор, пока GetRequest() не вернёт nullptr.
+    while(const auto& request = controller->GetRequest())
     {
-        ProcessRequest(request);
+        controller->PushRequest(request);
     }
 
-    {
-        const std::lock_guard<std::mutex> lock(stopMutex);
-        isStopRequested = true;
-    }
-
+    //3)	Корректно остановить рабочие потоки.
+    // Они должны доделать текущий ProcessRequest, если он имеется, и остановиться.
+    // Если имеются необработанные задания, не обращать на них внимания.
+    controller->ProcessStop();
     for(auto &thread : threads)
     {
         thread.join();
     }
 
+    //4)	Завершить программу.
     return 0;
 }
