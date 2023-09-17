@@ -81,8 +81,8 @@ public:
 
     bool Started()
     {
-        const std::scoped_lock lock{requestMutex_, stopMutex_};
-        return isStarted_ && requestQueue_.size() < maxRequestInQueue_;
+        const std::lock_guard<std::mutex> lock(stopMutex_);
+        return isStarted_;
     }
 
     void ProcessStop()
@@ -108,7 +108,6 @@ private:
     std::mutex stopMutex_;
     std::queue<Request*> requestQueue_;
     bool isStarted_ = true;
-    const int maxRequestInQueue_ = 10;
 };
 
 const int NumberOfThreads = 2;
@@ -128,10 +127,25 @@ void threadWorkerFunction(std::shared_ptr<RequestController> controller)
     }
 }
 
+void threadUserInput(std::shared_ptr<RequestController> controller)
+{
+    char ch = 0;
+    while(controller->Started() && ch != 'Q')
+    {
+        std::cin >> ch;
+    }
+
+    // ... GetRequest возвращает nullptr если нужно завершить процесс
+    controller->ProcessStop();
+}
+
 int main()
 {
-    std::srand(std::time(nullptr));
+    std::srand(std::time(nullptr)); // инициализация random для различного времени ожидания.
     const auto controller = std::make_shared<RequestController>();
+
+    // Запустить поток ввода пользователя. Для возможности останова controller
+    auto inputThread = std::thread(threadUserInput, controller);
 
     //1)	Запустить несколько рабочих потоков (NumberOfThreads).
     std::vector<std::thread> threads(NumberOfThreads);
@@ -154,6 +168,8 @@ int main()
     {
         thread.join();
     }
+
+    inputThread.join(); // Ждать завершения потока ввода пользователя
 
     //4)	Завершить программу.
     return 0;
