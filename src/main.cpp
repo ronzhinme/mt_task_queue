@@ -3,9 +3,16 @@
 #include <thread>
 #include <mutex>
 #include <cstdlib> // for rand
+#include <memory> // for shared_ptr
 
 using namespace std;
 using namespace std::chrono_literals;
+
+const auto getRandomWaitTime()
+{
+    static int MAX_WAIT_TIME = 5000; // 5s
+    return 100 + (std::rand() / ((RAND_MAX + 1u) / MAX_WAIT_TIME));
+}
 
 class Request
 {
@@ -26,7 +33,7 @@ public:
     Request* GetRequest() throw()
     {
         // Вызовы GetRequest() и ProcessRequest() могут работать долго.
-        const auto waitTime = std::chrono::milliseconds(100 + (std::rand() / 30));
+        const auto waitTime = std::chrono::milliseconds(getRandomWaitTime() / 2); // пусть выдает задачи быстрее, чем решает их в 2 раза
         std::this_thread::sleep_for(waitTime);
         std::cout << "wait ms: " << waitTime.count() << std::endl;
 
@@ -37,6 +44,7 @@ public:
 
         try
         {
+            requestCount_++;
             return new Request();
         }
         catch(...)
@@ -50,7 +58,7 @@ public:
     void ProcessRequest(Request* request) throw()
     {
         // Вызовы GetRequest() и ProcessRequest() могут работать долго.
-        const auto waitTime = std::chrono::milliseconds(100 + (std::rand() / 30));
+        const auto waitTime = std::chrono::milliseconds(getRandomWaitTime());
         std::this_thread::sleep_for(waitTime);
         std::cout << "wait ms: " << waitTime.count() << std::endl;
 
@@ -82,7 +90,7 @@ public:
     bool Started()
     {
         const std::lock_guard<std::mutex> lock(stopMutex_);
-        return isStarted_;
+        return isStarted_ && requestCount_ < stopAfterRequest_; // считаем, что нужно остановить или по команде ProcessStop или при достижении stopAfterRequest_
     }
 
     void ProcessStop()
@@ -108,6 +116,10 @@ private:
     std::mutex stopMutex_;
     std::queue<Request*> requestQueue_;
     bool isStarted_ = true;
+
+    // программный признак "нужно завершить процесс"
+    int requestCount_ = 0;
+    const int stopAfterRequest_ = 1000;
 };
 
 const int NumberOfThreads = 2;
@@ -127,6 +139,7 @@ void threadWorkerFunction(std::shared_ptr<RequestController> controller)
     }
 }
 
+// отдельный поток пользовательского ввода. Ждет 'Q' для "нужно завершить процесс"
 void threadUserInput(std::shared_ptr<RequestController> controller)
 {
     char ch = 0;
